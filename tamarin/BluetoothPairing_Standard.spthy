@@ -1,0 +1,542 @@
+theory BluetoothPairing_Standard
+
+begin
+
+/*
+ * Standard BLE SMP Secure Connections abstraction.
+ *
+ * Scope:
+ *   - BLE SMP Phase-1 feature exchange
+ *   - Pairing Request / Pairing Response
+ *   - Abstract Passkey Entry confirmation
+ *   - Standard confirmation input excludes Req || Rsp
+ *   - Dolev--Yao control over the public network
+ *
+ * This is a symbolic abstraction. It does not model:
+ *   - concrete BLE link-layer channel hopping;
+ *   - actual elliptic-curve arithmetic;
+ *   - the complete Bluetooth f4/f5/f6/g2 definitions;
+ *   - concrete AES-CMAC computation;
+ *   - physical radio timing;
+ *   - a concrete BLE KeySize=7 implementation;
+ *   - brute-force enumeration of 2^ell candidates.
+ *
+ * The low-entropy rule below is deliberately an abstraction. It records
+ * the consequence of accepting a key already classified as low entropy.
+ */
+
+
+/* The only built-in used by the abstract low-entropy recovery rule. */
+builtins:
+  symmetric-encryption
+
+
+/*
+ * User-defined constructors.
+ *
+ * confirm/1:
+ *   Abstract standard confirmation value. In this model it depends on the
+ *   authentication material but not on the Pairing Request/Response
+ *   transcript.
+ *
+ * session_key/3:
+ *   Abstract final key term derived from the local negotiation view and the
+ *   authentication material. Different local views produce different
+ *   symbolic key terms.
+ *
+ * This is intentionally not a concrete Bluetooth key-derivation function.
+ */
+functions:
+  confirm/1,
+  session_key/3
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Facts
+ * --------------------------------------------------------------------------
+ *
+ * I_Wait:
+ *   Initiator has emitted its Pairing Request and waits for a response.
+ *
+ * R_Wait:
+ *   Responder has accepted a locally observed Pairing Request and emitted
+ *   a Pairing Response.
+ *
+ * I_Done / R_Done:
+ *   Local terminal markers used to prevent accidental reuse of the same
+ *   local state in this small model.
+ *
+ * LowEntropyKey:
+ *   An abstract classification that a key belongs to a reduced effective
+ *   key space.
+ */
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Initiator: Phase 1
+ * --------------------------------------------------------------------------
+ *
+ * The abstract Pairing Request contains:
+ *
+ *   role marker
+ *   session identifier
+ *   IOCap
+ *   AuthReq
+ *   KeySize
+ *   authentication material
+ *
+ * The actual BLE Pairing Request is seven octets. Here it is represented as
+ * a structured symbolic term because this file is intended to express the
+ * security relation rather than the concrete byte layout.
+ *
+ * The authentication material is public in this abstraction. This is
+ * sufficient to model transcript tampering: the adversary may replay the
+ * complete request while changing selected negotiation fields.
+ */
+rule Initiator_Start:
+  [ Fr(~sid), Fr(~auth) ]
+  --[
+      PairingRequestSent(
+        'I',
+        'R',
+        ~sid,
+        <'DisplayYesNo', 'MITM', '16'>,
+        ~auth
+      )
+    ]->
+  [
+      Out(
+        <
+          'PairingRequest',
+          ~sid,
+          <
+            'DisplayYesNo',
+            'MITM',
+            '16'
+          >,
+          ~auth
+        >
+      ),
+
+      I_Wait(
+        ~sid,
+        ~auth,
+        <
+          'DisplayYesNo',
+          'MITM',
+          '16'
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Responder: Phase 1
+ * --------------------------------------------------------------------------
+ *
+ * The responder accepts whatever Pairing Request is delivered through the
+ * public network. Since the request is not integrity protected, the network
+ * adversary may replace the negotiation tuple while preserving or replaying
+ * the other fields.
+ *
+ * The responder creates a fresh symbolic response payload. The response
+ * echoes the locally observed request context in this abstraction.
+ */
+rule Responder_Accept_Request:
+  [ In(<
+        'PairingRequest',
+        sid,
+        Req_R,
+        auth
+      >),
+    Fr(~rsp_R) ]
+  --[
+      PairingRequestReceived(
+        'R',
+        'I',
+        sid,
+        Req_R,
+        auth
+      ),
+
+      PairingResponseSent(
+        'R',
+        'I',
+        sid,
+        Req_R,
+        ~rsp_R,
+        auth
+      )
+    ]->
+  [
+      Out(
+        <
+          'PairingResponse',
+          sid,
+          Req_R,
+          ~rsp_R,
+          auth
+        >
+      ),
+
+      R_Wait(
+        sid,
+        Req_R,
+        ~rsp_R,
+        auth
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Initiator: Phase 2 confirmation
+ * --------------------------------------------------------------------------
+ *
+ * The initiator accepts a response containing the expected authentication
+ * material. The standard confirmation value is:
+ *
+ *   confirm(auth)
+ *
+ * The local Pairing Request and Pairing Response are intentionally absent
+ * from this confirmation input.
+ *
+ * The initiator commits to a key term derived from its own local view:
+ *
+ *   session_key(Req_I, Rsp_I, auth)
+ *
+ * This rule therefore allows a transcript-divergent local view to reach a
+ * commit event whenever the abstract confirmation value is accepted.
+ */
+rule Initiator_Confirm_Standard:
+  [ I_Wait(
+      sid,
+      auth,
+      Req_I
+    ),
+    In(<
+      'PairingResponse',
+      sid,
+      _Req_Echo,
+      Rsp_I,
+      auth
+    >) ]
+  --[
+      ConfirmationGenerated(
+        'I',
+        'R',
+        sid,
+        confirm(auth)
+      ),
+
+      Commit_Init(
+        'I',
+        'R',
+        sid,
+        session_key(Req_I, Rsp_I, auth),
+        Req_I,
+        Rsp_I
+      )
+    ]->
+  [
+      Out(
+        <
+          'Confirmation',
+          sid,
+          confirm(auth)
+        >
+      ),
+
+      I_Done(
+        sid,
+        auth,
+        Req_I,
+        Rsp_I
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Responder: confirmation verification
+ * --------------------------------------------------------------------------
+ *
+ * The responder verifies only the abstract standard confirmation value.
+ * The responder's locally observed Pairing Request and generated Pairing
+ * Response are not included in that value.
+ *
+ * The responder commits to:
+ *
+ *   session_key(Req_R, Rsp_R, auth)
+ *
+ * If Req_R/Rsp_R differ from the initiator's Req_I/Rsp_I, the two symbolic
+ * key terms may differ even though both sides accepted the same abstract
+ * confirmation.
+ */
+rule Responder_Verify_Standard:
+  [ R_Wait(
+      sid,
+      Req_R,
+      Rsp_R,
+      auth
+    ),
+    In(<
+      'Confirmation',
+      sid,
+      confirm(auth)
+    >) ]
+  --[
+      ConfirmationVerified(
+        'R',
+        'I',
+        sid,
+        confirm(auth)
+      ),
+
+      Commit_Res(
+        'R',
+        'I',
+        sid,
+        session_key(Req_R, Rsp_R, auth),
+        Req_R,
+        Rsp_R
+      )
+    ]->
+  [
+      R_Done(
+        sid,
+        auth,
+        Req_R,
+        Rsp_R
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Abstract low-entropy policy
+ * --------------------------------------------------------------------------
+ *
+ * This rule does not claim that BLE SMP accepts a concrete seven-octet or
+ * 56-bit cryptographic key.
+ *
+ * It models only the abstract event:
+ *
+ *   the adversary supplies a context already classified as low entropy
+ *
+ * The term K is an abstract key term. The concrete effective key length is
+ * intentionally not represented here.
+ */
+rule Accept_Abstract_Low_Entropy_Policy:
+  [ In(<
+      'LowEntropyPolicy',
+      sid,
+      K
+    >) ]
+  --[
+      LowEntropyAccepted(
+        sid,
+        K
+      )
+    ]->
+  [
+      !LowEntropyKey(K)
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Abstract low-entropy recovery
+ * --------------------------------------------------------------------------
+ *
+ * This is an explicit over-approximation of exhaustive search.
+ *
+ * It is not literal enumeration of candidates and does not provide a
+ * cracking-time estimate.
+ *
+ * The encrypted message is included to make the rule connect a classified
+ * low-entropy key to a later recovery event.
+ */
+rule Abstract_Low_Entropy_Recovery:
+  [ !LowEntropyKey(K),
+    In(senc(M, K)) ]
+  --[
+      ExhaustiveSearchAbstraction(K)
+    ]->
+  [
+      Out(K)
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * User prompt-confusion abstraction
+ * --------------------------------------------------------------------------
+ *
+ * This rule represents the nondeterministic human-interface abstraction
+ * described in the paper:
+ *
+ *   one device displays a value for confirmation;
+ *   another device requests passkey input;
+ *   the user transfers the displayed value to the other prompt.
+ *
+ * It does not model human probability, timing, wording, or a specific OS UI.
+ */
+rule User_Prompt_Confusion_Abstraction:
+  [ In(<
+      'DisplayYesNo',
+      D1,
+      U,
+      Passkey
+    >),
+    In(<
+      'AskInput',
+      D2,
+      U,
+      'Input'
+    >) ]
+  --[
+      UserPromptConfusion(
+        U,
+        D1,
+        D2,
+        Passkey
+      )
+    ]->
+  [
+      Out(<
+        'Confirm',
+        U,
+        D1,
+        'Y'
+      >),
+
+      Out(<
+        'Input',
+        U,
+        D2,
+        Passkey
+      >)
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Optional explicit transcript records
+ * --------------------------------------------------------------------------
+ *
+ * These rules expose the locally observed transcript components as trace
+ * facts. They are useful when inspecting a trace manually.
+ */
+rule Record_Initiator_Transcript:
+  [ I_Done(
+      sid,
+      auth,
+      Req_I,
+      Rsp_I
+    ) ]
+  --[
+      InitTranscript(
+        sid,
+        Req_I,
+        Rsp_I
+      )
+    ]->
+  [ ]
+
+
+rule Record_Responder_Transcript:
+  [ R_Done(
+      sid,
+      auth,
+      Req_R,
+      Rsp_R
+    ) ]
+  --[
+      ResTranscript(
+        sid,
+        Req_R,
+        Rsp_R
+      )
+    ]->
+  [ ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Security properties
+ * --------------------------------------------------------------------------
+ *
+ * Agreement_Negotiation:
+ *
+ * Whenever both sides commit in the same abstract session, their final key
+ * terms must be equal.
+ *
+ * In this standard model, the lemma is expected to be falsified because
+ * confirmation does not authenticate the local negotiation transcript.
+ */
+lemma Agreement_Negotiation:
+  "All I R sid KI KR ReqI RspI ReqR RspR #i #j.
+      Commit_Init(I, R, sid, KI, ReqI, RspI) @ i
+    & Commit_Res(R, I, sid, KR, ReqR, RspR) @ j
+    ==>
+      KI = KR"
+
+
+/*
+ * A more specific correspondence property for an honest-looking run.
+ *
+ * This is intentionally included as a separate property so that the broad
+ * key-term agreement claim and the concrete transcript-divergence witness
+ * can be inspected independently.
+ */
+lemma Agreement_With_Equal_Transcript:
+  "All I R sid K Req Rsp #i #j.
+      Commit_Init(I, R, sid, K, Req, Rsp) @ i
+    & Commit_Res(R, I, sid, K, Req, Rsp) @ j
+    ==>
+      True"
+
+
+/*
+ * Expected attack witness.
+ *
+ * This property asks Tamarin to find a trace in which:
+ *
+ *   - both endpoints commit;
+ *   - their final key terms differ;
+ *   - their locally observed Pairing Request terms differ, or
+ *   - their locally observed Pairing Response terms differ.
+ *
+ * The lemma is written as an exists-trace query. A successful proof of this
+ * existential property means that the standard abstraction admits such a
+ * trace. It is not a cryptographic break of a concrete implementation.
+ */
+lemma Reachable_Transcript_Divergence:
+  exists-trace
+  "Ex I R sid KI KR ReqI RspI ReqR RspR #i #j.
+      Commit_Init(I, R, sid, KI, ReqI, RspI) @ i
+    & Commit_Res(R, I, sid, KR, ReqR, RspR) @ j
+    & KI != KR
+    & (
+          ReqI != ReqR
+        | RspI != RspR
+      )"
+
+
+/*
+ * The abstract low-entropy path is reachable whenever the adversary can
+ * provide a matching ciphertext for a key classified as low entropy.
+ *
+ * This lemma only checks reachability of the abstraction.
+ */
+lemma Reachable_Low_Entropy_Recovery:
+  exists-trace
+  "Ex K #i.
+      ExhaustiveSearchAbstraction(K) @ i"
+
+
+end
