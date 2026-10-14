@@ -1,0 +1,278 @@
+From 6d2eb136539f55d82291ad60af9f8583db4e3031 Mon Sep 17 00:00:00 2001
+From: Lei Li 
+Date: Tue, 15 May 2026 12:00:00 +0800
+Subject: [PATCH] Bluetooth: SMP: bind Passkey Entry f4 to feature transcript
+
+This experimental patch implements the Passkey Entry transcript-binding
+construction described in:
+
+  Conditional Min-Entropy Loss and Transcript Binding in Bluetooth
+  Low Energy Pairing
+
+The userspace environment used by the experiment is BlueZ 5.50, but the
+Linux Bluetooth stack performs the operational BLE SMP Secure Connections
+confirmation calculation in net/bluetooth/smp.c. Therefore this patch is
+stored with the BlueZ experiment artifacts while modifying the Linux kernel.
+
+Assumed baseline:
+
+  Linux tag:       v5.4
+  Linux commit:    219d54332a09e8d8741c1e1982f5eae56099de85
+  BlueZ version:   5.50
+  Test OS:         Ubuntu 20.04 LTS
+  Association:     BLE Secure Connections Passkey Entry
+
+This commit changes the Passkey Entry confirmation calculation from:
+
+  f4(U, V, X, Z) =
+      AES-CMAC_X(U || V || Z)
+
+to:
+
+  f4_ctx(U, V, X, Z, T) =
+      AES-CMAC_X(U || V || Z || T)
+
+where:
+
+  T = Pairing Request || Pairing Response
+
+The transcript always has canonical protocol-role ordering:
+
+  initiator Pairing Request || responder Pairing Response
+
+Both commands include their SMP command-code octet and are therefore seven
+octets each. The authenticated f4 input grows from 65 to 79 octets:
+
+  U       32 octets
+  V       32 octets
+  Z        1 octet
+  preq     7 octets
+  prsp     7 octets
+  -----------------
+  total   79 octets
+
+The existing smp_chan preq and prsp arrays are assumed to contain the exact
+SMP command bytes accepted by the local state machine. No semantic
+re-encoding is performed.
+
+Only Secure Connections Passkey Entry confirmation rounds use the modified
+function. Numeric Comparison, Just Works, OOB pairing, legacy pairing and
+BR/EDR procedures retain their standard calculations.
+
+The experimental mode is controlled by the transcript_binding module
+parameter. It defaults to disabled. There is deliberately no automatic
+fallback after a context-bound confirmation failure.
+
+Both peers must run the same experimental mode. An enabled endpoint is not
+confirmation-compatible with an unmodified endpoint for the affected Passkey
+Entry procedure. This patch does not define an authenticated capability
+negotiation mechanism.
+
+This patch does not implement a KeySize downgrade and does not claim that
+BLE Secure Connections accepts a seven-octet effective key.
+
+Prototype assumptions
+---------------------
+
+The original paper does not publish its source commit or exact implementation
+hunks. This reconstruction assumes that the target prototype branch exposes
+all Passkey Entry f4 generation and verification through sc_passkey_f4().
+If a target 5.4 tree calls smp_f4() directly from more than one Passkey Entry
+location, those calls must be replaced with sc_passkey_f4() as well.
+
+The target tree must be audited with:
+
+  grep -n "smp_f4(" net/bluetooth/smp.c
+  grep -n "sc_passkey_f4(" net/bluetooth/smp.c
+
+before experimental results are recorded.
+
+Signed-off-by: Lei Li <lilei20001101@163.com>
+---
+ net/bluetooth/smp.c | 136 ++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 134 insertions(+), 2 deletions(-)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index 9f1e6a5d45ae..db694e4f81bf 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -32,6 +32,29 @@
+ #include "hci_request.h"
+ #include "smp.h"
+ 
++/*
++ * Experimental bilateral protocol variant.
++ *
++ * This option changes the Secure Connections Passkey Entry confirmation
++ * value and is therefore not interoperable with an unmodified peer.
++ *
++ * It is intentionally disabled by default.  The experiment provisions both
++ * peers out of band and enables this option on both systems.  No on-air
++ * capability bit and no automatic fallback are provided because an
++ * unauthenticated negotiation mechanism would introduce a downgrade path.
++ */
++static bool transcript_binding;
++module_param(transcript_binding, bool, 0600);
++MODULE_PARM_DESC(transcript_binding,
++		 "Bind BLE SC Passkey Entry f4 to Pairing Request/Response "
++		 "transcript (experimental, bilateral, incompatible)");
++
++#define SMP_PAIRING_CMD_LEN	7
++#define SMP_F4_STD_INPUT_LEN	65
++#define SMP_TRANSCRIPT_LEN	(2 * SMP_PAIRING_CMD_LEN)
++#define SMP_F4_CTX_INPUT_LEN	(SMP_F4_STD_INPUT_LEN + \
++				 SMP_TRANSCRIPT_LEN)
++
+ static inline void swap_buf(const u8 *src, u8 *dst, size_t len)
+ {
+ 	while (len--)
+@@ -160,6 +183,96 @@ static int smp_f4(struct crypto_shash *tfm_cmac, const u8 u[32],
+ 	return smp_e(tfm_cmac, x, m, sizeof(m), res);
+ }
+ 
++/*
++ * smp_f4_ctx() - experimental context-bound f4 calculation
++ * @tfm_cmac: AES-CMAC transform
++ * @u:        first public-key x-coordinate
++ * @v:        second public-key x-coordinate
++ * @x:        fresh 128-bit Passkey Entry round nonce used as CMAC key
++ * @z:        Passkey Entry round value
++ * @preq:     complete seven-octet initiator Pairing Request command
++ * @prsp:     complete seven-octet responder Pairing Response command
++ * @res:      resulting 128-bit confirmation value
++ *
++ * The authenticated byte string is:
++ *
++ *     U || V || Z || PairingRequest || PairingResponse
++ *
++ * The Pairing Request and Pairing Response are copied in canonical protocol
++ * role order.  They are never ordered according to local transmit/receive
++ * direction.
++ *
++ * The u/v conversions below deliberately match smp_f4().  The transcript
++ * bytes are copied without field-by-field semantic reconstruction so that
++ * the value authenticated by this prototype corresponds to the complete
++ * cached SMP command encodings.
++ */
++static int smp_f4_ctx(struct crypto_shash *tfm_cmac, const u8 u[32],
++		      const u8 v[32], const u8 x[16], u8 z,
++		      const u8 preq[SMP_PAIRING_CMD_LEN],
++		      const u8 prsp[SMP_PAIRING_CMD_LEN],
++		      u8 res[16])
++{
++	u8 m[SMP_F4_CTX_INPUT_LEN];
++	int err;
++
++	if (!tfm_cmac || !u || !v || !x || !preq || !prsp || !res)
++		return -EINVAL;
++
++	/*
++	 * Retain the byte-order convention used by the existing smp_f4()
++	 * implementation for the Bluetooth public-key coordinates.
++	 */
++	swap_buf(u, m, 32);
++	swap_buf(v, m + 32, 32);
++	m[64] = z;
++
++	/*
++	 * smp->preq and smp->prsp are canonical by protocol role:
++	 *
++	 *     preq = initiator Pairing Request
++	 *     prsp = responder Pairing Response
++	 *
++	 * This is true for both local initiator and local responder roles.
++	 */
++	memcpy(m + SMP_F4_STD_INPUT_LEN, preq, SMP_PAIRING_CMD_LEN);
++	memcpy(m + SMP_F4_STD_INPUT_LEN + SMP_PAIRING_CMD_LEN,
++	       prsp, SMP_PAIRING_CMD_LEN);
++
++	err = smp_e(tfm_cmac, x, m, sizeof(m), res);
++
++	/*
++	 * The transcript is public, but clearing the temporary buffer also
++	 * removes the copied public-key coordinates and keeps this helper's
++	 * cleanup behavior explicit.
++	 */
++	memzero_explicit(m, sizeof(m));
++
++	return err;
++}
++
++/*
++ * sc_passkey_f4() is the sole f4 dispatch point for Secure Connections
++ * Passkey Entry in the assumed prototype branch.
++ *
++ * Standard operation remains byte-for-byte unchanged when the module
++ * parameter is disabled.  When enabled, a missing feature transcript is a
++ * hard protocol error.  The implementation must not silently fall back to
++ * standard f4 because doing so would make a transcript-stripping downgrade
++ * possible.
++ */
++static int sc_passkey_f4(struct smp_chan *smp, const u8 u[32],
++			 const u8 v[32], const u8 x[16], u8 z,
++			 u8 res[16])
++{
++	if (!transcript_binding)
++		return smp_f4(smp->tfm_cmac, u, v, x, z, res);
++
++	/*
++	 * Pairing Request and Pairing Response command codes are nonzero.
++	 * The validity check protects against invoking context-bound f4 before
++	 * Phase 1 has populated both fixed-size command buffers.
++	 */
++	if (smp->preq[0] != SMP_CMD_PAIRING_REQ ||
++	    smp->prsp[0] != SMP_CMD_PAIRING_RSP) {
++		BT_ERR("SMP transcript binding requested without complete "
++		       "Pairing Request/Response transcript");
++		return -EPROTO;
++	}
++
++	BT_DBG("SMP context-bound Passkey Entry f4: req=%*phN rsp=%*phN",
++	       SMP_PAIRING_CMD_LEN, smp->preq,
++	       SMP_PAIRING_CMD_LEN, smp->prsp);
++
++	return smp_f4_ctx(smp->tfm_cmac, u, v, x, z,
++			  smp->preq, smp->prsp, res);
++}
++
+ static int smp_g2(struct crypto_shash *tfm_cmac, const u8 u[32],
+ 		  const u8 v[32], const u8 x[16], const u8 y[16],
+ 		  u32 *val)
+@@ -820,8 +933,15 @@ static int sc_passkey_send_confirm(struct smp_chan *smp)
+ 	r = ((smp->passkey >> smp->passkey_round) & 0x01) | 0x80;
+ 
+-	err = smp_f4(smp->tfm_cmac, smp->local_pk, smp->remote_pk,
+-		     smp->prnd, r, confirm);
++	/*
++	 * Both confirmation generation and verification must use the same
++	 * dispatch function.  In experimental mode this authenticates the
++	 * canonical Pairing Request/Pairing Response transcript during every
++	 * one of the 20 Passkey Entry rounds.
++	 */
++	err = sc_passkey_f4(smp, smp->local_pk, smp->remote_pk,
++			    smp->prnd, r, confirm);
+ 	if (err)
+ 		return err;
+ 
+@@ -886,8 +1006,20 @@ static int sc_passkey_verify_confirm(struct smp_chan *smp,
+ 	r = ((smp->passkey >> smp->passkey_round) & 0x01) | 0x80;
+ 
+-	err = smp_f4(smp->tfm_cmac, smp->remote_pk, smp->local_pk,
+-		     random, r, confirm);
++	/*
++	 * Verify against the transcript cached by this endpoint.  If an
++	 * attacker changed IOCap, AuthReq or any other byte in either Phase 1
++	 * command, the two peers use different 79-octet CMAC inputs and the
++	 * received confirmation does not match.
++	 *
++	 * The surrounding state machine must retain the normal Bluetooth
++	 * confirmation-before-random ordering.  In particular, a stored
++	 * confirmation must not be replaced after the peer nonce is known.
++	 */
++	err = sc_passkey_f4(smp, smp->remote_pk, smp->local_pk,
++			    random, r, confirm);
+ 	if (err)
+ 		return err;
+ 
+-- 
+2.43.0
