@@ -1,0 +1,32 @@
+{
+  "format_version": 1,
+  "experiment_id": "ble-transcript-binding-20260515",
+  "source": "simulation",
+  "seed": 20260515,
+  "runs_per_cell": 1000,
+  "cell_count": 6,
+  "total_runs": 6000,
+  "real_hci_capture": false,
+  "real_over_the_air_capture": false,
+  "real_pcap": false,
+  "real_btsnoop": false,
+  "files": {
+    "summary.json": {
+      "kind": "summary"
+    },
+    "outcomes.csv": {
+      "kind": "aggregate"
+    },
+    "runs.jsonl": {
+      "kind": "per_run_records"
+    },
+    "results.sqlite3": {
+      "kind": "database"
+    },
+    "logs": {
+      "kind": "logs"
+    },
+
+    }
+  }
+}
