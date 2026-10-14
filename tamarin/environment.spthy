@@ -1,0 +1,1521 @@
+theory environment
+
+begin
+
+/*
+ * BLE pairing experiment environment.
+ *
+ * This file is a standalone Tamarin theory describing the environment,
+ * attacker capabilities, and experiment profiles used by the accompanying
+ * Bluetooth pairing models.
+ *
+ * It is intentionally independent from:
+ *
+ *   BluetoothPairing_Standard.spthy
+ *   BluetoothPairing_ContextBound.spthy
+ *
+ * The two protocol files remain self-contained. This environment theory is
+ * useful for:
+ *
+ *   - validating that the intended injection scenarios are reachable;
+ *   - documenting the symbolic meaning of each experimental manipulation;
+ *   - producing small, inspectable Tamarin traces;
+ *   - separating host/HCI injection assumptions from protocol claims.
+ *
+ * Important interpretation:
+ *
+ *   Tamarin's In(...) and Out(...) facts already model a Dolev--Yao
+ *   adversary controlling the public network.
+ *
+ *   Consequently, the explicit forwarding and mutation rules below do not
+ *   grant capabilities beyond the ordinary public-network attacker. Their
+ *   main purpose is to attach action facts such as:
+ *
+ *       HostHCIRequestInjection(...)
+ *
+ *   to traces, so that experiment profiles can be queried directly.
+ *
+ * This theory does not claim to model:
+ *
+ *   - transparent over-the-air BLE man-in-the-middle operation;
+ *   - link-layer channel hopping;
+ *   - connection-event timing;
+ *   - CRC, whitening, PHY modulation, or retransmissions;
+ *   - concrete HCI packet framing;
+ *   - concrete BlueZ internal state;
+ *   - controller firmware behavior;
+ *   - concrete AES-CMAC or ECDH arithmetic;
+ *   - a demonstrated real-device KeySize=7 attack;
+ *   - concrete exhaustive-search cost.
+ */
+
+
+builtins:
+  symmetric-encryption
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Symbolic message constructors
+ * --------------------------------------------------------------------------
+ *
+ * preq/6 represents the six configurable fields in the seven-octet SMP
+ * Pairing Request payload:
+ *
+ *   preq(
+ *       IOCapability,
+ *       OOBDataFlag,
+ *       AuthReq,
+ *       MaximumEncryptionKeySize,
+ *       InitiatorKeyDistribution,
+ *       ResponderKeyDistribution
+ *   )
+ *
+ * The SMP command code is represented by the outer 'PairingRequest' tag.
+ *
+ * pres/6 represents the corresponding Pairing Response fields.
+ *
+ * Neither constructor is intended to represent the exact byte encoding.
+ */
+functions:
+  preq/6,
+  pres/6
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Default symbolic field values
+ * --------------------------------------------------------------------------
+ *
+ * The model uses quoted public constants:
+ *
+ *   'DisplayYesNo'
+ *   'KeyboardOnly'
+ *   'NoInputNoOutput'
+ *
+ *   'OOBNotPresent'
+ *   'OOBPresent'
+ *
+ *   'BondingMITMSC'
+ *   'BondingNoMITMSC'
+ *
+ *   'KeySize16'
+ *   'KeySize7'
+ *
+ *   'EncKey'
+ *   'IdKey'
+ *   'SignKey'
+ *   'NoKeyDistribution'
+ *
+ * These constants are labels, not literal Bluetooth octet values.
+ */
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Honest initiator source
+ * --------------------------------------------------------------------------
+ *
+ * Creates one fresh symbolic pairing session.
+ *
+ * The default request expresses:
+ *
+ *   IOCapability             = DisplayYesNo
+ *   OOBDataFlag              = OOBNotPresent
+ *   AuthReq                  = BondingMITMSC
+ *   MaximumEncryptionKeySize = KeySize16
+ *   InitiatorKeyDistribution = EncKey
+ *   ResponderKeyDistribution = IdKey
+ *
+ * The fresh value ~auth represents protocol material that must remain
+ * associated with the same abstract pairing run. It is not a literal
+ * Bluetooth passkey or concrete ECDH secret.
+ */
+rule Honest_Initiator_Emit_Request:
+  [ Fr(~sid),
+    Fr(~auth) ]
+  --[
+      HonestRequestCreated(
+        ~sid,
+        preq(
+          'DisplayYesNo',
+          'OOBNotPresent',
+          'BondingMITMSC',
+          'KeySize16',
+          'EncKey',
+          'IdKey'
+        ),
+        ~auth
+      )
+    ]->
+  [
+      Out(
+        <
+          'PairingRequest',
+          ~sid,
+          preq(
+            'DisplayYesNo',
+            'OOBNotPresent',
+            'BondingMITMSC',
+            'KeySize16',
+            'EncKey',
+            'IdKey'
+          ),
+          ~auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Normal request forwarding
+ * --------------------------------------------------------------------------
+ *
+ * This rule labels an unmodified request-forwarding trace.
+ *
+ * Since In(...) is controlled by the Dolev--Yao adversary, the rule can be
+ * interpreted as an experiment harness receiving a request and forwarding
+ * exactly the same symbolic message.
+ */
+rule Forward_Request_Unmodified:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        request,
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HonestRequestForwarded(
+        sid,
+        request,
+        auth
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingRequest',
+          sid,
+          request,
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Responder behavior
+ * --------------------------------------------------------------------------
+ *
+ * The responder consumes a request as delivered by the experiment
+ * environment and generates a fresh response nonce.
+ *
+ * The complete response fields are represented by pres/6. The response
+ * uses a fixed symbolic policy:
+ *
+ *   IOCapability             = DisplayYesNo
+ *   OOBDataFlag              = OOBNotPresent
+ *   AuthReq                  = BondingMITMSC
+ *   MaximumEncryptionKeySize = KeySize16
+ *   InitiatorKeyDistribution = EncKey
+ *   ResponderKeyDistribution = IdKey
+ *
+ * observed_request is retained in the outer message so that later rules can
+ * state which request context the responder used.
+ */
+rule Honest_Responder_Emit_Response:
+  [ In(
+      <
+        'ForwardedPairingRequest',
+        sid,
+        observed_request,
+        auth
+      >
+    ),
+    Fr(~response_nonce) ]
+  --[
+      ResponderObservedRequest(
+        sid,
+        observed_request,
+        auth
+      ),
+
+      HonestResponseCreated(
+        sid,
+        observed_request,
+        pres(
+          'DisplayYesNo',
+          'OOBNotPresent',
+          'BondingMITMSC',
+          'KeySize16',
+          'EncKey',
+          'IdKey'
+        ),
+        ~response_nonce,
+        auth
+      )
+    ]->
+  [
+      Out(
+        <
+          'PairingResponse',
+          sid,
+          observed_request,
+          pres(
+            'DisplayYesNo',
+            'OOBNotPresent',
+            'BondingMITMSC',
+            'KeySize16',
+            'EncKey',
+            'IdKey'
+          ),
+          ~response_nonce,
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Normal response forwarding
+ * --------------------------------------------------------------------------
+ */
+rule Forward_Response_Unmodified:
+  [ In(
+      <
+        'PairingResponse',
+        sid,
+        observed_request,
+        response,
+        response_nonce,
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HonestResponseForwarded(
+        sid,
+        observed_request,
+        response,
+        response_nonce,
+        auth
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingResponse',
+          sid,
+          observed_request,
+          response,
+          response_nonce,
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Pairing Request IOCapability injection
+ * --------------------------------------------------------------------------
+ *
+ * The harness changes:
+ *
+ *   DisplayYesNo -> KeyboardOnly
+ *
+ * while preserving:
+ *
+ *   - session identifier;
+ *   - OOB flag;
+ *   - AuthReq;
+ *   - maximum encryption key size;
+ *   - key-distribution fields;
+ *   - abstract authentication material.
+ *
+ * This is a host/HCI injection abstraction. It is not a claim of
+ * transparent over-the-air packet replacement.
+ */
+rule Inject_Request_IOCapability:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        preq(
+          'DisplayYesNo',
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HostHCIRequestInjection(
+        sid,
+        'io_capability',
+        preq(
+          'DisplayYesNo',
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        preq(
+          'KeyboardOnly',
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      ),
+
+      IOCapabilityInjected(
+        sid,
+        'DisplayYesNo',
+        'KeyboardOnly'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingRequest',
+          sid,
+          preq(
+            'KeyboardOnly',
+            oob,
+            auth_req,
+            key_size,
+            initiator_key_distribution,
+            responder_key_distribution
+          ),
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Pairing Request AuthReq injection
+ * --------------------------------------------------------------------------
+ *
+ * The harness changes:
+ *
+ *   BondingMITMSC -> BondingNoMITMSC
+ *
+ * while preserving the other request fields.
+ *
+ * This symbolically represents removal of the MITM requirement. The quoted
+ * labels are not concrete AuthReq octet values.
+ */
+rule Inject_Request_AuthReq:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        preq(
+          io_capability,
+          oob,
+          'BondingMITMSC',
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HostHCIRequestInjection(
+        sid,
+        'auth_req',
+        preq(
+          io_capability,
+          oob,
+          'BondingMITMSC',
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        preq(
+          io_capability,
+          oob,
+          'BondingNoMITMSC',
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      ),
+
+      AuthReqInjected(
+        sid,
+        'BondingMITMSC',
+        'BondingNoMITMSC'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingRequest',
+          sid,
+          preq(
+            io_capability,
+            oob,
+            'BondingNoMITMSC',
+            key_size,
+            initiator_key_distribution,
+            responder_key_distribution
+          ),
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Pairing Request OOB flag injection
+ * --------------------------------------------------------------------------
+ *
+ * The harness changes:
+ *
+ *   OOBNotPresent -> OOBPresent
+ *
+ * This rule is included to make the Phase-1 transcript model complete
+ * enough for controlled symbolic comparison. It does not assert that a
+ * concrete peer will accept an OOB mode without valid OOB material.
+ */
+rule Inject_Request_OOB_Flag:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        preq(
+          io_capability,
+          'OOBNotPresent',
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HostHCIRequestInjection(
+        sid,
+        'oob_flag',
+        preq(
+          io_capability,
+          'OOBNotPresent',
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        preq(
+          io_capability,
+          'OOBPresent',
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      ),
+
+      OOBFlagInjected(
+        sid,
+        'OOBNotPresent',
+        'OOBPresent'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingRequest',
+          sid,
+          preq(
+            io_capability,
+            'OOBPresent',
+            auth_req,
+            key_size,
+            initiator_key_distribution,
+            responder_key_distribution
+          ),
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Symbolic-only KeySize downgrade
+ * --------------------------------------------------------------------------
+ *
+ * The harness changes:
+ *
+ *   KeySize16 -> KeySize7
+ *
+ * This rule belongs to the parameterized symbolic model only.
+ *
+ * It MUST NOT be interpreted as evidence that:
+ *
+ *   - the accompanying HCI experiment performs this downgrade;
+ *   - BlueZ accepts this value in the tested configuration;
+ *   - a controller reduces a Secure Connections key to 56 effective bits;
+ *   - the paper experimentally demonstrated this exact downgrade.
+ *
+ * The SymbolicOnly(...) event is deliberately emitted to make this
+ * limitation visible in generated traces.
+ */
+rule Symbolic_Only_Inject_Request_KeySize:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        preq(
+          io_capability,
+          oob,
+          auth_req,
+          'KeySize16',
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'symbolic_model'
+      ),
+
+      SymbolicOnly(
+        sid,
+        'key_size_downgrade'
+      ),
+
+      HostHCIRequestInjection(
+        sid,
+        'key_size_symbolic_only',
+        preq(
+          io_capability,
+          oob,
+          auth_req,
+          'KeySize16',
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        preq(
+          io_capability,
+          oob,
+          auth_req,
+          'KeySize7',
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      ),
+
+      KeySizeInjected(
+        sid,
+        'KeySize16',
+        'KeySize7'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingRequest',
+          sid,
+          preq(
+            io_capability,
+            oob,
+            auth_req,
+            'KeySize7',
+            initiator_key_distribution,
+            responder_key_distribution
+          ),
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Pairing Request key-distribution injection
+ * --------------------------------------------------------------------------
+ *
+ * The harness changes both key-distribution fields to NoKeyDistribution.
+ *
+ * This rule provides a separate trace label for key-distribution negotiation
+ * changes. It does not imply disclosure of any distributed key.
+ */
+rule Inject_Request_Key_Distribution:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        preq(
+          io_capability,
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HostHCIRequestInjection(
+        sid,
+        'key_distribution',
+        preq(
+          io_capability,
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        preq(
+          io_capability,
+          oob,
+          auth_req,
+          key_size,
+          'NoKeyDistribution',
+          'NoKeyDistribution'
+        ),
+        auth
+      ),
+
+      KeyDistributionInjected(
+        sid,
+        initiator_key_distribution,
+        responder_key_distribution,
+        'NoKeyDistribution',
+        'NoKeyDistribution'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingRequest',
+          sid,
+          preq(
+            io_capability,
+            oob,
+            auth_req,
+            key_size,
+            'NoKeyDistribution',
+            'NoKeyDistribution'
+          ),
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Pairing Response IOCapability injection
+ * --------------------------------------------------------------------------
+ *
+ * This rule changes the responder's Pairing Response IOCapability:
+ *
+ *   DisplayYesNo -> NoInputNoOutput
+ *
+ * The responder's observed request, response nonce, and authentication
+ * material are preserved.
+ */
+rule Inject_Response_IOCapability:
+  [ In(
+      <
+        'PairingResponse',
+        sid,
+        observed_request,
+        pres(
+          'DisplayYesNo',
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        response_nonce,
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HostHCIResponseInjection(
+        sid,
+        'io_capability',
+        pres(
+          'DisplayYesNo',
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        pres(
+          'NoInputNoOutput',
+          oob,
+          auth_req,
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      ),
+
+      ResponseIOCapabilityInjected(
+        sid,
+        'DisplayYesNo',
+        'NoInputNoOutput'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingResponse',
+          sid,
+          observed_request,
+          pres(
+            'NoInputNoOutput',
+            oob,
+            auth_req,
+            key_size,
+            initiator_key_distribution,
+            responder_key_distribution
+          ),
+          response_nonce,
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Pairing Response AuthReq injection
+ * --------------------------------------------------------------------------
+ */
+rule Inject_Response_AuthReq:
+  [ In(
+      <
+        'PairingResponse',
+        sid,
+        observed_request,
+        pres(
+          io_capability,
+          oob,
+          'BondingMITMSC',
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        response_nonce,
+        auth
+      >
+    ) ]
+  --[
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ),
+
+      HostHCIResponseInjection(
+        sid,
+        'auth_req',
+        pres(
+          io_capability,
+          oob,
+          'BondingMITMSC',
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        pres(
+          io_capability,
+          oob,
+          'BondingNoMITMSC',
+          key_size,
+          initiator_key_distribution,
+          responder_key_distribution
+        ),
+        auth
+      ),
+
+      ResponseAuthReqInjected(
+        sid,
+        'BondingMITMSC',
+        'BondingNoMITMSC'
+      )
+    ]->
+  [
+      Out(
+        <
+          'ForwardedPairingResponse',
+          sid,
+          observed_request,
+          pres(
+            io_capability,
+            oob,
+            'BondingNoMITMSC',
+            key_size,
+            initiator_key_distribution,
+            responder_key_distribution
+          ),
+          response_nonce,
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Passive observer
+ * --------------------------------------------------------------------------
+ *
+ * This rule models a passive artifact collector observing an already public
+ * request. The observer does not alter the message and does not learn any
+ * term that is not already available on the public network.
+ *
+ * Re-emitting the same term allows the protocol trace to continue after the
+ * observation event.
+ */
+rule Passive_Observer_Record_Request:
+  [ In(
+      <
+        'PairingRequest',
+        sid,
+        request,
+        auth
+      >
+    ) ]
+  --[
+      PassiveObservation(
+        sid,
+        'pairing_request',
+        request
+      )
+    ]->
+  [
+      Out(
+        <
+          'PairingRequest',
+          sid,
+          request,
+          auth
+        >
+      )
+  ]
+
+
+rule Passive_Observer_Record_Response:
+  [ In(
+      <
+        'PairingResponse',
+        sid,
+        observed_request,
+        response,
+        response_nonce,
+        auth
+      >
+    ) ]
+  --[
+      PassiveObservation(
+        sid,
+        'pairing_response',
+        response
+      )
+    ]->
+  [
+      Out(
+        <
+          'PairingResponse',
+          sid,
+          observed_request,
+          response,
+          response_nonce,
+          auth
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * User prompt-confusion abstraction
+ * --------------------------------------------------------------------------
+ *
+ * The environment receives:
+ *
+ *   <'DisplayYesNoPrompt', display_device, user, value>
+ *
+ * and:
+ *
+ *   <'PasskeyInputPrompt', input_device, user>
+ *
+ * It then models the user:
+ *
+ *   - confirming the first prompt;
+ *   - entering the displayed value in the second prompt.
+ *
+ * This is a nondeterministic human-interaction abstraction. It does not
+ * assign a probability to user behavior and does not model concrete UI text.
+ */
+rule User_Prompt_Confusion:
+  [ In(
+      <
+        'DisplayYesNoPrompt',
+        display_device,
+        user,
+        displayed_value
+      >
+    ),
+
+    In(
+      <
+        'PasskeyInputPrompt',
+        input_device,
+        user
+      >
+    ) ]
+  --[
+      UserPromptConfusion(
+        user,
+        display_device,
+        input_device,
+        displayed_value
+      )
+    ]->
+  [
+      Out(
+        <
+          'UserConfirmation',
+          user,
+          display_device,
+          'Yes'
+        >
+      ),
+
+      Out(
+        <
+          'UserPasskeyInput',
+          user,
+          input_device,
+          displayed_value
+        >
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Abstract low-entropy key classification
+ * --------------------------------------------------------------------------
+ *
+ * A public environment command classifies K as low entropy.
+ *
+ * This is a modeling hook, not an experimentally observed BLE event.
+ */
+rule Classify_Abstract_Low_Entropy_Key:
+  [ In(
+      <
+        'ClassifyLowEntropy',
+        sid,
+        K
+      >
+    ) ]
+  --[
+      SymbolicOnly(
+        sid,
+        'low_entropy_classification'
+      ),
+
+      LowEntropyAccepted(
+        sid,
+        K
+      )
+    ]->
+  [
+      !LowEntropyKey(
+        sid,
+        K
+      )
+  ]
+
+
+/*
+ * --------------------------------------------------------------------------
+ * Abstract exhaustive-search consequence
+ * --------------------------------------------------------------------------
+ *
+ * Given:
+ *
+ *   - a key already classified as low entropy; and
+ *   - a ciphertext under that key,
+ *
+ * this rule releases the key to the adversary.
+ *
+ * It over-approximates exhaustive search. It does not enumerate candidates,
+ * count guesses, model hardware performance, or estimate elapsed time.
+ */
+rule Abstract_Low_Entropy_Recovery:
+  [ !LowEntropyKey(
+      sid,
+      K
+    ),
+
+    In(
+      senc(
+        plaintext,
+        K
+      )
+    ) ]
+  --[
+      ExhaustiveSearchAbstraction(
+        sid,
+        K
+      )
+    ]->
+  [
+      Out(K)
+  ]
+
+
+/*
+ * ==========================================================================
+ * Reachability lemmas
+ * ==========================================================================
+ */
+
+
+/*
+ * Sanity check: an honest request can be generated.
+ */
+lemma Reachable_Honest_Request:
+  exists-trace
+  "Ex sid request auth #i.
+      HonestRequestCreated(
+        sid,
+        request,
+        auth
+      ) @ i"
+
+
+/*
+ * Sanity check: the environment can forward an unmodified request.
+ */
+lemma Reachable_Unmodified_Request_Forwarding:
+  exists-trace
+  "Ex sid request auth #i.
+      HonestRequestForwarded(
+        sid,
+        request,
+        auth
+      ) @ i"
+
+
+/*
+ * Sanity check: a responder can observe a forwarded request.
+ */
+lemma Reachable_Honest_Response:
+  exists-trace
+  "Ex sid request response nonce auth #i.
+      HonestResponseCreated(
+        sid,
+        request,
+        response,
+        nonce,
+        auth
+      ) @ i"
+
+
+/*
+ * IOCapability request injection is reachable.
+ */
+lemma Reachable_Request_IOCapability_Injection:
+  exists-trace
+  "Ex sid #i.
+      IOCapabilityInjected(
+        sid,
+        'DisplayYesNo',
+        'KeyboardOnly'
+      ) @ i"
+
+
+/*
+ * AuthReq request injection is reachable.
+ */
+lemma Reachable_Request_AuthReq_Injection:
+  exists-trace
+  "Ex sid #i.
+      AuthReqInjected(
+        sid,
+        'BondingMITMSC',
+        'BondingNoMITMSC'
+      ) @ i"
+
+
+/*
+ * OOB flag request injection is reachable.
+ */
+lemma Reachable_Request_OOB_Injection:
+  exists-trace
+  "Ex sid #i.
+      OOBFlagInjected(
+        sid,
+        'OOBNotPresent',
+        'OOBPresent'
+      ) @ i"
+
+
+/*
+ * The symbolic KeySize profile is reachable.
+ *
+ * Success proves only that the symbolic environment contains this profile.
+ */
+lemma Reachable_Symbolic_KeySize_Injection:
+  exists-trace
+  "Ex sid #i.
+      KeySizeInjected(
+        sid,
+        'KeySize16',
+        'KeySize7'
+      ) @ i
+    & SymbolicOnly(
+        sid,
+        'key_size_downgrade'
+      ) @ i"
+
+
+/*
+ * Key-distribution-field injection is reachable.
+ */
+lemma Reachable_Key_Distribution_Injection:
+  exists-trace
+  "Ex sid old_i old_r #i.
+      KeyDistributionInjected(
+        sid,
+        old_i,
+        old_r,
+        'NoKeyDistribution',
+        'NoKeyDistribution'
+      ) @ i"
+
+
+/*
+ * Pairing Response IOCapability injection is reachable.
+ */
+lemma Reachable_Response_IOCapability_Injection:
+  exists-trace
+  "Ex sid #i.
+      ResponseIOCapabilityInjected(
+        sid,
+        'DisplayYesNo',
+        'NoInputNoOutput'
+      ) @ i"
+
+
+/*
+ * Pairing Response AuthReq injection is reachable.
+ */
+lemma Reachable_Response_AuthReq_Injection:
+  exists-trace
+  "Ex sid #i.
+      ResponseAuthReqInjected(
+        sid,
+        'BondingMITMSC',
+        'BondingNoMITMSC'
+      ) @ i"
+
+
+/*
+ * The user prompt-confusion abstraction is reachable.
+ */
+lemma Reachable_User_Prompt_Confusion:
+  exists-trace
+  "Ex user display_device input_device value #i.
+      UserPromptConfusion(
+        user,
+        display_device,
+        input_device,
+        value
+      ) @ i"
+
+
+/*
+ * The low-entropy recovery abstraction is reachable.
+ */
+lemma Reachable_Abstract_Low_Entropy_Recovery:
+  exists-trace
+  "Ex sid K #i.
+      ExhaustiveSearchAbstraction(
+        sid,
+        K
+      ) @ i"
+
+
+/*
+ * ==========================================================================
+ * Structural consistency lemmas
+ * ==========================================================================
+ */
+
+
+/*
+ * An IOCapability injection changes only the IOCapability field.
+ *
+ * The old and new preq terms share:
+ *
+ *   - OOB flag;
+ *   - AuthReq;
+ *   - key size;
+ *   - initiator key distribution;
+ *   - responder key distribution.
+ *
+ * This is a structural check on the explicit injection rule, not a claim
+ * about arbitrary Dolev--Yao messages.
+ */
+lemma Request_IOCapability_Injection_Field_Locality:
+  "All sid old_request new_request auth #i.
+      HostHCIRequestInjection(
+        sid,
+        'io_capability',
+        old_request,
+        new_request,
+        auth
+      ) @ i
+    ==>
+      Ex oob auth_req key_size init_keys resp_keys.
+          old_request =
+            preq(
+              'DisplayYesNo',
+              oob,
+              auth_req,
+              key_size,
+              init_keys,
+              resp_keys
+            )
+        & new_request =
+            preq(
+              'KeyboardOnly',
+              oob,
+              auth_req,
+              key_size,
+              init_keys,
+              resp_keys
+            )"
+
+
+/*
+ * An AuthReq injection changes only the AuthReq field.
+ */
+lemma Request_AuthReq_Injection_Field_Locality:
+  "All sid old_request new_request auth #i.
+      HostHCIRequestInjection(
+        sid,
+        'auth_req',
+        old_request,
+        new_request,
+        auth
+      ) @ i
+    ==>
+      Ex io_capability oob key_size init_keys resp_keys.
+          old_request =
+            preq(
+              io_capability,
+              oob,
+              'BondingMITMSC',
+              key_size,
+              init_keys,
+              resp_keys
+            )
+        & new_request =
+            preq(
+              io_capability,
+              oob,
+              'BondingNoMITMSC',
+              key_size,
+              init_keys,
+              resp_keys
+            )"
+
+
+/*
+ * An OOB injection changes only the OOB flag.
+ */
+lemma Request_OOB_Injection_Field_Locality:
+  "All sid old_request new_request auth #i.
+      HostHCIRequestInjection(
+        sid,
+        'oob_flag',
+        old_request,
+        new_request,
+        auth
+      ) @ i
+    ==>
+      Ex io_capability auth_req key_size init_keys resp_keys.
+          old_request =
+            preq(
+              io_capability,
+              'OOBNotPresent',
+              auth_req,
+              key_size,
+              init_keys,
+              resp_keys
+            )
+        & new_request =
+            preq(
+              io_capability,
+              'OOBPresent',
+              auth_req,
+              key_size,
+              init_keys,
+              resp_keys
+            )"
+
+
+/*
+ * Every explicit KeySize7 injection is marked symbolic-only.
+ */
+lemma KeySize7_Injection_Is_Symbolic_Only:
+  "All sid #i.
+      KeySizeInjected(
+        sid,
+        'KeySize16',
+        'KeySize7'
+      ) @ i
+    ==>
+      SymbolicOnly(
+        sid,
+        'key_size_downgrade'
+      ) @ i"
+
+
+/*
+ * Every explicit IOCapability request injection is labeled as host/HCI.
+ */
+lemma Request_IOCapability_Injection_Uses_Host_HCI:
+  "All sid old_value new_value #i.
+      IOCapabilityInjected(
+        sid,
+        old_value,
+        new_value
+      ) @ i
+    ==>
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ) @ i"
+
+
+/*
+ * Every explicit AuthReq request injection is labeled as host/HCI.
+ */
+lemma Request_AuthReq_Injection_Uses_Host_HCI:
+  "All sid old_value new_value #i.
+      AuthReqInjected(
+        sid,
+        old_value,
+        new_value
+      ) @ i
+    ==>
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ) @ i"
+
+
+/*
+ * Every explicit response IOCapability injection is labeled as host/HCI.
+ */
+lemma Response_IOCapability_Injection_Uses_Host_HCI:
+  "All sid old_value new_value #i.
+      ResponseIOCapabilityInjected(
+        sid,
+        old_value,
+        new_value
+      ) @ i
+    ==>
+      InjectionLayer(
+        sid,
+        'host_hci'
+      ) @ i"
+
+
+/*
+ * Low-entropy recovery requires an earlier or simultaneous classification.
+ *
+ * In the current rules the classification necessarily precedes recovery,
+ * because the persistent LowEntropyKey fact must already exist.
+ */
+lemma Low_Entropy_Recovery_Requires_Classification:
+  "All sid K #i.
+      ExhaustiveSearchAbstraction(
+        sid,
+        K
+      ) @ i
+    ==>
+      Ex #j.
+          LowEntropyAccepted(
+            sid,
+            K
+          ) @ j
+        & #j < #i"
+
+
+end
