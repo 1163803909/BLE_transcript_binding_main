@@ -1,0 +1,7 @@
+scenario_id,variant,pair,block,timeout,total,pair_rate,block_rate,timeout_rate
+normal,standard,987,0,13,1000,0.987,0.000,0.013
+normal,context_bound,985,0,15,1000,0.985,0.000,0.015
+iocap_tampered,standard,974,0,26,1000,0.974,0.000,0.026
+iocap_tampered,context_bound,0,981,19,1000,0.000,0.981,0.019
+authreq_tampered,standard,982,0,18,1000,0.982,0.000,0.018
+authreq_tampered,context_bound,0,978,22,1000,0.000,0.978,0.022

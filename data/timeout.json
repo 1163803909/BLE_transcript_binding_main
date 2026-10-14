@@ -1,0 +1,44 @@
+{
+  "normal": {
+    "standard": {
+      "link_loss": 4,
+      "smp_timer": 5,
+      "injector_timeout": 3,
+      "controller_reset": 1
+    },
+    "context_bound": {
+      "link_loss": 5,
+      "smp_timer": 5,
+      "injector_timeout": 4,
+      "controller_reset": 1
+    }
+  },
+  "iocap_tampered": {
+    "standard": {
+      "link_loss": 9,
+      "smp_timer": 9,
+      "injector_timeout": 6,
+      "controller_reset": 2
+    },
+    "context_bound": {
+      "link_loss": 6,
+      "smp_timer": 7,
+      "injector_timeout": 5,
+      "controller_reset": 1
+    }
+  },
+  "authreq_tampered": {
+    "standard": {
+      "link_loss": 6,
+      "smp_timer": 6,
+      "injector_timeout": 5,
+      "controller_reset": 1
+    },
+    "context_bound": {
+      "link_loss": 7,
+      "smp_timer": 8,
+      "injector_timeout": 6,
+      "controller_reset": 1
+    }
+  }
+}

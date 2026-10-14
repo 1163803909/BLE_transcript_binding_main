@@ -1,0 +1,80 @@
+{
+  "source": "simulation",
+  "seed": 20260515,
+  "runs_per_cell": 1000,
+  "total_runs": 6000,
+  "cells": [
+    {
+      "scenario_id": "normal",
+      "variant": "standard",
+      "pair": 987,
+      "block": 0,
+      "timeout": 13,
+      "total": 1000,
+      "pair_rate": 0.987,
+      "block_rate": 0.0,
+      "timeout_rate": 0.013
+    },
+    {
+      "scenario_id": "normal",
+      "variant": "context_bound",
+      "pair": 985,
+      "block": 0,
+      "timeout": 15,
+      "total": 1000,
+      "pair_rate": 0.985,
+      "block_rate": 0.0,
+      "timeout_rate": 0.015
+    },
+    {
+      "scenario_id": "iocap_tampered",
+      "variant": "standard",
+      "pair": 974,
+      "block": 0,
+      "timeout": 26,
+      "total": 1000,
+      "pair_rate": 0.974,
+      "block_rate": 0.0,
+      "timeout_rate": 0.026
+    },
+    {
+      "scenario_id": "iocap_tampered",
+      "variant": "context_bound",
+      "pair": 0,
+      "block": 981,
+      "timeout": 19,
+      "total": 1000,
+      "pair_rate": 0.0,
+      "block_rate": 0.981,
+      "timeout_rate": 0.019
+    },
+    {
+      "scenario_id": "authreq_tampered",
+      "variant": "standard",
+      "pair": 982,
+      "block": 0,
+      "timeout": 18,
+      "total": 1000,
+      "pair_rate": 0.982,
+      "block_rate": 0.0,
+      "timeout_rate": 0.018
+    },
+    {
+      "scenario_id": "authreq_tampered",
+      "variant": "context_bound",
+      "pair": 0,
+      "block": 978,
+      "timeout": 22,
+      "total": 1000,
+      "pair_rate": 0.0,
+      "block_rate": 0.978,
+      "timeout_rate": 0.022
+    }
+  ],
+  "grand_total": {
+    "pair": 3928,
+    "block": 1959,
+    "timeout": 113,
+    "total": 6000
+  }
+}
