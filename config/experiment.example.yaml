@@ -1,0 +1,227 @@
+# Controlled BLE SMP Passkey Entry experiment configuration.
+#
+# This file is an example only. It does not contain real device addresses,
+# controller indexes, keys, or captured packets.
+#
+# Scope:
+#   - BLE SMP Secure Connections
+#   - Passkey Entry
+#   - Host/HCI-layer fault injection
+#   - Optional passive sideband capture
+#
+# This configuration does NOT model or enable:
+#   - transparent OTA MITM
+#   - BR/EDR KNOB
+#   - BLE KeySize=7 downgrade
+#   - Numeric Comparison
+#   - Just Works
+#   - OOB pairing
+
+project:
+  name: "ble-smp-transcript-binding"
+  schema_version: 1
+
+defaults:
+  variant: "context_bound"
+  scenario: "normal_no_injection"
+  repetitions: 1
+  timeout_seconds: 120
+  artifact_root: "artifacts"
+  dry_run: true
+
+testbed:
+  os: "Ubuntu 20.04 LTS"
+  kernel_expected: "5.4.0"
+  bluez_version: "5.50"
+  wireshark_version: "3.2.3"
+
+  # These are labels only. Replace them locally in a controlled testbed.
+  host_name: "lab-host"
+  initiator_controller: "hci0"
+  responder_controller: "hci1"
+  passive_capture_device: "ubertooth0"
+
+  injection_layer: "host_hci"
+  passive_observer: "ubertooth_sideband"
+  transparent_ota_mitm: false
+
+  # Do not put private keys, passkeys, or persistent Bluetooth secrets here.
+  initiator_address: "REPLACE_WITH_TEST_DEVICE"
+  responder_address: "REPLACE_WITH_TEST_DEVICE"
+
+  environment:
+    bluetooth_debug: true
+    preserve_existing_bonds: false
+    isolated_testbed: true
+
+capture:
+  enabled: false
+
+  # Optional long-running capture process.
+  # It is started before the HCI experiment and terminated afterwards.
+  #
+  # Commands are argv arrays, not shell strings.
+  # Available placeholders:
+  #   {run_dir}
+  #   {hci_controller}
+  #   {scenario}
+  #   {variant}
+  #   {run_id}
+  start_command: []
+  stop_command: []
+
+  hci:
+    enabled: true
+    controller: "hci1"
+    output_filename: "hci_capture.log"
+
+  ubertooth:
+    enabled: false
+    device: "ubertooth0"
+    output_filename: "ubertooth_capture.pcap"
+
+  wireshark:
+    enabled: false
+    output_filename: "merged_analysis.pcapng"
+
+scenarios:
+  normal_no_injection:
+    description: >
+      Normal BLE Secure Connections Passkey Entry execution without
+      intentional transcript modification.
+    allowed_variants:
+      - "standard"
+      - "context_bound"
+    injection:
+      enabled: false
+      fields: []
+    expected_outcomes:
+      - "pairing_completed"
+      - "timeout"
+      - "transport_failure"
+      - "unexpected_rejection"
+
+  iocap_tampered:
+    description: >
+      Controlled host/HCI-layer modification of the selected IOCap field
+      in the test Pairing Request or Pairing Response.
+    allowed_variants:
+      - "standard"
+      - "context_bound"
+    injection:
+      enabled: true
+      layer: "host_hci"
+      fields:
+        - "io_capability"
+      source_pdu:
+        - "pairing_request"
+        - "pairing_response"
+    expected_outcomes:
+      - "pairing_completed"
+      - "blocked"
+      - "timeout"
+      - "transport_failure"
+      - "unexpected_rejection"
+
+  authreq_tampered:
+    description: >
+      Controlled host/HCI-layer modification of the selected AuthReq field
+      in the test Pairing Request or Pairing Response.
+    allowed_variants:
+      - "standard"
+      - "context_bound"
+    injection:
+      enabled: true
+      layer: "host_hci"
+      fields:
+        - "auth_req"
+      source_pdu:
+        - "pairing_request"
+        - "pairing_response"
+    expected_outcomes:
+      - "pairing_completed"
+      - "blocked"
+      - "timeout"
+      - "transport_failure"
+      - "unexpected_rejection"
+
+# Commands are deliberately disabled in this example.
+#
+# Set enabled: true only after reviewing the command and confirming that:
+#   1. both endpoints are owned or explicitly authorized for testing;
+#   2. the controllers are isolated from production Bluetooth devices;
+#   3. the command writes all raw packets and logs below {run_dir};
+#   4. the command does not use an unapproved OTA intermediary.
+commands:
+  prepare:
+    enabled: false
+    command: []
+
+  capture_start:
+    enabled: false
+    command: []
+
+  experiment:
+    enabled: false
+    command:
+      - "python3"
+      - "-m"
+      - "src.experiment.hci_runner"
+      - "--scenario"
+      - "{scenario}"
+      - "--variant"
+      - "{variant}"
+      - "--config"
+      - "{config_snapshot}"
+      - "--output"
+      - "{run_dir}"
+
+  analyze:
+    enabled: false
+    command:
+      - "python3"
+      - "scripts/analyze_artifacts.py"
+      - "--run-dir"
+      - "{run_dir}"
+
+  capture_stop:
+    enabled: false
+    command: []
+
+  cleanup:
+    enabled: false
+    command: []
+
+analysis:
+  # These filenames are conventions used by the runner. Existing modules may
+  # produce additional files.
+  outcome_file: "raw_outcome_counts.json"
+  run_record_file: "run_record.json"
+  trace_file: "analysis/smp_trace.json"
+  manifest_file: "manifest.json"
+
+  # The runner never creates a successful outcome merely because a command
+  # exited with status 0. Outcome files must be generated by the experiment
+  # or analysis implementation.
+  require_observed_outcome_file: false
+
+artifacts:
+  directories:
+    - "hci"
+    - "pcap"
+    - "injected"
+    - "analysis"
+    - "logs"
+    - "commands"
+
+  preserve:
+    - "manifest.json"
+    - "config.snapshot.yaml"
+    - "run_record.json"
+    - "raw_outcome_counts.json"
+    - "injected"
+    - "hci"
+    - "pcap"
+    - "analysis"
+    - "logs"
+    - "commands"
